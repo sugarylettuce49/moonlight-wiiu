@@ -30,12 +30,17 @@ static short* pcmBuffer;
 static int samplesPerFrame;
 static SDL_AudioDeviceID dev;
 static int channelCount;
+static int sampleRate;
+
+// the device buffer is 4096 samples (~85ms at 48kHz), allow some headroom on top
+#define MAX_QUEUED_AUDIO_MS 250
 
 static int sdl_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* context, int arFlags) {
   int rc;
   decoder = opus_multistream_decoder_create(opusConfig->sampleRate, opusConfig->channelCount, opusConfig->streams, opusConfig->coupledStreams, opusConfig->mapping, &rc);
 
   channelCount = opusConfig->channelCount;
+  sampleRate = opusConfig->sampleRate;
   samplesPerFrame = opusConfig->samplesPerFrame;
   pcmBuffer = malloc(sizeof(short) * channelCount * samplesPerFrame);
   if (pcmBuffer == NULL)
@@ -79,6 +84,14 @@ static void sdl_renderer_cleanup() {
 static void sdl_renderer_decode_and_play_sample(char* data, int length) {
   int decodeLen = opus_multistream_decode(decoder, data, length, pcmBuffer, samplesPerFrame, 0);
   if (decodeLen > 0) {
+    // If the host's and the Wii U's audio clocks drift apart the queue
+    // slowly grows, adding more and more latency. Drop the backlog once it
+    // gets well past what the device buffer needs.
+    const Uint32 bytesPerMs = (Uint32) (sampleRate / 1000) * channelCount * sizeof(short);
+    if (SDL_GetQueuedAudioSize(dev) > bytesPerMs * MAX_QUEUED_AUDIO_MS) {
+      SDL_ClearQueuedAudio(dev);
+    }
+
     SDL_QueueAudio(dev, pcmBuffer, decodeLen * channelCount * sizeof(short));
   } else {
     printf("Opus error from decode: %d\n", decodeLen);

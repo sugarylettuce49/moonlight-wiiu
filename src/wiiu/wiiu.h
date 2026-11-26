@@ -15,6 +15,7 @@ enum {
   STATE_START_STREAM,
   STATE_STOP_STREAM,
   STATE_STREAMING,
+  STATE_SETTINGS,
 };
 
 #include <Limelight.h>
@@ -35,7 +36,10 @@ void wiiu_stream_draw(void);
 void wiiu_stream_fini(void);
 void wiiu_setup_renderstate(void);
 
-#define NUM_BUFFERS 2
+// Number of decode target textures. The renderer always shows the newest
+// decoded frame, so the decoder has to be able to run a few frames ahead
+// without overwriting the texture the GPU is currently scanning out.
+#define NUM_BUFFERS 4
 #define MAX_QUEUEMESSAGES 16
 
 typedef struct {
@@ -45,8 +49,8 @@ typedef struct {
 
 void* get_frame(void);
 void add_frame(yuv_texture_t* msg);
-
-extern uint32_t nextFrame;
+void reset_frame_queue(void);
+void wiiu_stream_set_video_size(uint32_t height, uint32_t texture_height);
 
 extern AUDIO_RENDERER_CALLBACKS audio_callbacks_wiiu;
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_wiiu;
@@ -56,6 +60,7 @@ void wiiu_input_init(void);
 void wiiu_input_update(void); // this is only relevant while streaming
 uint32_t wiiu_input_num_controllers(void);
 uint32_t wiiu_input_buttons_triggered(void); // only really used for the menu
+uint32_t wiiu_input_buttons_held(void); // buttons held during the last wiiu_input_buttons_triggered call
 void start_input_thread(void);
 void stop_input_thread(void);
 

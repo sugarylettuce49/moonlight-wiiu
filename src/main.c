@@ -40,6 +40,7 @@
 #include <arpa/inet.h>
 
 #include "wiiu/wiiu.h"
+#include "wiiu/settings.h"
 #include <whb/gfx.h>
 #include <vpad/input.h>
 
@@ -74,7 +75,7 @@ static int get_app_id(GS_CLIENT client, PSERVER_DATA server, const char *name) {
   return -1;
 }
 
-static int stream(GS_CLIENT client, PSERVER_DATA server, PCONFIGURATION config) {
+static int start_stream(GS_CLIENT client, PSERVER_DATA server, PCONFIGURATION config) {
   int appId = get_app_id(client, server, config->app);
   if (appId<0) {
     fprintf(stderr, "Can't find app %s\n", config->app);
@@ -121,6 +122,37 @@ static int stream(GS_CLIENT client, PSERVER_DATA server, PCONFIGURATION config) 
   return 0;
 }
 
+static int stream(GS_CLIENT client, PSERVER_DATA server, PCONFIGURATION config) {
+  // A bitrate of -1 means "auto": resolve it from the current resolution/fps
+  // for this stream only, so the setting stays "auto" for the settings menu.
+  int requested_bitrate = config->stream.bitrate;
+  if (requested_bitrate <= 0)
+    config->stream.bitrate = config_default_bitrate(config->stream.width, config->stream.height, config->stream.fps);
+
+  int ret = start_stream(client, server, config);
+
+  config->stream.bitrate = requested_bitrate;
+  return ret;
+}
+
+// Opens the settings menu, remembering where to go back to
+static int settings_return_state = STATE_DISCONNECTED;
+static char settings_prev_address[256];
+
+static void open_settings(PCONFIGURATION config, GS_CLIENT client, PSERVER_DATA server, int return_state) {
+  PAPP_LIST apps = NULL;
+  if (return_state == STATE_CONNECTED && client != NULL) {
+    // offer the host's apps in the menu
+    if (gs_applist(client, server, &apps) != GS_OK)
+      apps = NULL;
+  }
+
+  snprintf(settings_prev_address, sizeof(settings_prev_address), "%s", config->address ? config->address : "");
+  settings_return_state = return_state;
+  settings_open(config, apps);
+  state = STATE_SETTINGS;
+}
+
 int main(int argc, char* argv[]) {
   wiiu_proc_init();
 
@@ -152,10 +184,13 @@ int main(int argc, char* argv[]) {
   config.unsupported = true;
   config.sops = false;
 
+  // set when the GameStream client couldn't be created, nothing works without it
+  char fatal_message[512] = "";
+
   if (config.address == NULL) {
     fprintf(stderr, "Specify an IP address\n");
-    Font_Clear();
-    Font_Print(8, 58, "Specify an IP address in the configuration file.\nMake sure to remove the '#' in front of the 'address' line.");
+    snprintf(message_buffer, sizeof(message_buffer), "No host address is set.\nOpen the settings to enter your PC's IP address.\n");
+    is_error = 1;
     state = STATE_INVALID;
   }
   else {
@@ -174,8 +209,7 @@ int main(int argc, char* argv[]) {
   if (client == NULL && gs_get_error(NULL) == GS_BAD_CONF) {
     if (gs_conf_init(config.key_dir) != GS_OK) {
       fprintf(stderr, "Failed to create client info: %s\n", gs_get_error_message());
-      Font_Clear();
-      Font_Printf(8, 58, "Failed to create client info:\n %s.", gs_get_error_message());
+      snprintf(fatal_message, sizeof(fatal_message), "Failed to create client info:\n %s.\n", gs_get_error_message());
       state = STATE_INVALID;
     } else {
       client = gs_new(config.key_dir);
@@ -184,16 +218,64 @@ int main(int argc, char* argv[]) {
 
   if (client == NULL) {
     fprintf(stderr, "Failed to create GameStream client: %s\n", gs_get_error_message());
-    Font_Clear();
-    Font_Printf(8, 58, "Failed to create GameStream client:\n %s.", gs_get_error_message());
+    if (fatal_message[0] == '\0')
+      snprintf(fatal_message, sizeof(fatal_message), "Failed to create GameStream client:\n %s.\n", gs_get_error_message());
     state = STATE_INVALID;
   }
 
+  if (fatal_message[0] != '\0') {
+    snprintf(message_buffer, sizeof(message_buffer), "%s", fatal_message);
+    is_error = 1;
+  }
+
   SERVER_DATA server;
+  memset(&server, 0, sizeof(server));
   while (wiiu_proc_running()) {
     switch (state) {
       case STATE_INVALID: {
+        Font_Clear();
+        Font_SetSize(50);
+        Font_SetColor(255, 255, 255, 255);
+        Font_Printf(8, 58, "Moonlight Wii U %s\n"
+                           SCREEN_BAR
+                           "Press  to open settings", VERSION_STRING);
+
+        Font_SetColor(255, 0, 0, 255);
+        Font_Print(8, 400, message_buffer);
         Font_Draw_TVDRC();
+
+        uint32_t btns = wiiu_input_buttons_triggered();
+        if (btns & VPAD_BUTTON_X) {
+          open_settings(&config, client, &server, STATE_INVALID);
+        }
+        break;
+      }
+      case STATE_SETTINGS: {
+        int res = settings_update(&config);
+        if (res == SETTINGS_ACTIVE)
+          break;
+
+        if (res == SETTINGS_CANCELLED) {
+          state = settings_return_state;
+          break;
+        }
+
+        // saved
+        bool address_changed = strcmp(settings_prev_address, config.address ? config.address : "") != 0;
+        if (client == NULL) {
+          // settings were saved, but we still can't talk to a host
+          snprintf(message_buffer, sizeof(message_buffer), "%s", fatal_message);
+          is_error = 1;
+          state = STATE_INVALID;
+        } else if (config.address == NULL) {
+          snprintf(message_buffer, sizeof(message_buffer), "No host address is set.\nOpen the settings to enter your PC's IP address.\n");
+          is_error = 1;
+          state = STATE_INVALID;
+        } else if (address_changed || settings_return_state == STATE_INVALID) {
+          state = STATE_CONNECTING;
+        } else {
+          state = settings_return_state;
+        }
         break;
       }
       case STATE_DISCONNECTED: {
@@ -203,7 +285,7 @@ int main(int argc, char* argv[]) {
 
         Font_Printf(8, 58, "Moonlight Wii U %s (Disconnected)\n"
                            SCREEN_BAR
-                           "Press \ue000 to connect to %s", VERSION_STRING, config.address);
+                           "Press \ue000 to connect to %s\nPress \ue002 to open settings", VERSION_STRING, config.address);
 
         if (is_error) {
           Font_SetColor(255, 0, 0, 255);
@@ -220,6 +302,9 @@ int main(int argc, char* argv[]) {
         if (btns & VPAD_BUTTON_A) {
           message_buffer[0] = '\0';
           state = STATE_CONNECTING;
+        } else if (btns & VPAD_BUTTON_X) {
+          message_buffer[0] = '\0';
+          open_settings(&config, client, &server, STATE_DISCONNECTED);
         }
         break;
       }
@@ -286,7 +371,7 @@ int main(int argc, char* argv[]) {
 
         Font_Printf(8, 58, "Moonlight Wii U %s (Connected to %s)\n"
                            SCREEN_BAR
-                           "Press \ue000 to stream\nPress \ue001 to pair\n", VERSION_STRING, config.address);
+                           "Press \ue000 to stream\nPress \ue001 to pair\nPress \ue002 to open settings\n", VERSION_STRING, config.address);
 
         if (is_error) {
           Font_SetColor(255, 0, 0, 255);
@@ -305,6 +390,9 @@ int main(int argc, char* argv[]) {
         } else if (btns & VPAD_BUTTON_B) {
           message_buffer[0] = '\0';
           state = STATE_PAIRING;
+        } else if (btns & VPAD_BUTTON_X) {
+          message_buffer[0] = '\0';
+          open_settings(&config, client, &server, STATE_CONNECTED);
         }
         break;
       }

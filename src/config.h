@@ -17,11 +17,18 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#pragma once
+
 #include <Limelight.h>
 
 #include <stdbool.h>
 
 #define MAX_INPUTS 6
+
+#ifdef __WIIU__
+#define MOONLIGHT_WIIU_PATH "/vol/external01/wiiu/apps/moonlight"
+#define MOONLIGHT_WIIU_CONFIG_FILE MOONLIGHT_WIIU_PATH "/moonlight.conf"
+#endif
 
 enum codecs { CODEC_UNSPECIFIED, CODEC_H264, CODEC_HEVC, CODEC_AV1 };
 
@@ -62,3 +69,4 @@ extern bool inputAdded;
 
 bool config_file_parse(char* filename, PCONFIGURATION config);
 void config_parse(int argc, char* argv[], PCONFIGURATION config);
+int config_default_bitrate(int width, int height, int fps);

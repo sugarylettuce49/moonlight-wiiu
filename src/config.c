@@ -36,7 +36,6 @@ extern int autostream;
 
 extern ssize_t getline(char **buf, size_t *bufsiz, FILE *fp);
 
-#define MOONLIGHT_WIIU_PATH "/vol/external01/wiiu/apps/moonlight"
 #endif
 
 #define MOONLIGHT_PATH "/moonlight"
@@ -330,10 +329,20 @@ bool config_file_parse(char* filename, PCONFIGURATION config) {
     if (sscanf(line, "%ms = %m[^\n]", &key, &value) == 2) {
 #else
     char key[1024];
-    if (sscanf(line, "%1023s = %4095s[^\n]", key, value) == 2) {
+    if (sscanf(line, " %1023s = %4095[^\n]", key, value) == 2) {
+      // strip trailing whitespace / CR from files edited on Windows
+      size_t vlen = strlen(value);
+      while (vlen > 0 && (value[vlen - 1] == '\r' || value[vlen - 1] == ' ' || value[vlen - 1] == '\t'))
+        value[--vlen] = '\0';
 #endif
       if (strcmp(key, "address") == 0) {
         config->address = strdup(value);
+#ifdef __WIIU__
+      } else if (strcmp(key, "absolute_positioning") == 0) {
+        // option name from older releases, superseded by mouse_mode
+        if (strcmp("true", value) == 0)
+          mouse_mode = MOUSE_MODE_ABSOLUTE;
+#endif
       } else if (strcmp(key, "sops") == 0) {
         config->sops = strcmp("true", value) == 0;
       } else {
@@ -420,7 +429,17 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 #ifdef __WIIU__
   // TODO test how slow audio encryption is
   config->stream.encryptionFlags = ENCFLG_NONE;
-  config->stream.fps = 30;
+
+  // Wii U defaults: 854x480 is the GamePad's native resolution, which keeps
+  // 60 fps decoding and Wi-Fi bandwidth comfortable. 4 Mbps gives a bit of
+  // headroom over the auto value (3 Mbps) for fast motion at 60 fps, and a
+  // 1200 byte packet size stays well clear of the MTU on Wi-Fi.
+  config->stream.width = 854;
+  config->stream.height = 480;
+  config->stream.fps = 60;
+  config->stream.bitrate = 4096;
+  config->stream.packetSize = 1200;
+  config->stream.streamingRemotely = STREAM_CFG_LOCAL;
 #endif
 
   config->debug_level = 0;
@@ -450,6 +469,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
   config->key_dir[0] = 0;
 #else
+  config->app = "Desktop";
   config->codec = CODEC_H264;
   config->mapping = (char*) "";
   strcpy(config->key_dir, MOONLIGHT_WIIU_PATH "/keys");
@@ -487,30 +507,39 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
       sprintf(config->key_dir, "%s" DEFAULT_CACHE_DIR MOONLIGHT_PATH, pw->pw_dir);
   }
 #else
-  char* config_file = (char*) MOONLIGHT_WIIU_PATH "/moonlight.conf";
+  char* config_file = (char*) MOONLIGHT_WIIU_CONFIG_FILE;
   if (config_file)
     config_file_parse(config_file, config);
 #endif
 
-  if (config->stream.bitrate == -1) {
-    // This table prefers 16:10 resolutions because they are
-    // only slightly more pixels than the 16:9 equivalents, so
-    // we don't want to bump those 16:10 resolutions up to the
-    // next 16:9 slot.
+#ifndef __WIIU__
+  if (config->stream.bitrate <= 0)
+    config->stream.bitrate = config_default_bitrate(config->stream.width, config->stream.height, config->stream.fps);
+#endif
+  // On Wii U the bitrate stays at -1 ("auto") here so the settings menu can
+  // tell it apart from an explicit value. It's resolved right before the
+  // stream starts, after any per-host config has been applied.
+}
 
-    if (config->stream.width * config->stream.height <= 640 * 360) {
-      config->stream.bitrate = (int)(1000 * (config->stream.fps / 30.0));
-    } else if (config->stream.width * config->stream.height <= 854 * 480) {
-      config->stream.bitrate = (int)(1500 * (config->stream.fps / 30.0));
-    } else if (config->stream.width * config->stream.height <= 1366 * 768) {
-      // This covers 1280x720 and 1280x800 too
-      config->stream.bitrate = (int)(5000 * (config->stream.fps / 30.0));
-    } else if (config->stream.width * config->stream.height <= 1920 * 1200) {
-      config->stream.bitrate = (int)(10000 * (config->stream.fps / 30.0));
-    } else if (config->stream.width * config->stream.height <= 2560 * 1600) {
-      config->stream.bitrate = (int)(20000 * (config->stream.fps / 30.0));
-    } else /* if (config->stream.width * config->stream.height <= 3840 * 2160) */ {
-      config->stream.bitrate = (int)(40000 * (config->stream.fps / 30.0));
-    }
-  }
+int config_default_bitrate(int width, int height, int fps) {
+  // This table prefers 16:10 resolutions because they are
+  // only slightly more pixels than the 16:9 equivalents, so
+  // we don't want to bump those 16:10 resolutions up to the
+  // next 16:9 slot.
+  int pixels = width * height;
+  double fpsScale = fps / 30.0;
+
+  if (pixels <= 640 * 360)
+    return (int)(1000 * fpsScale);
+  else if (pixels <= 854 * 480)
+    return (int)(1500 * fpsScale);
+  else if (pixels <= 1366 * 768)
+    // This covers 1280x720 and 1280x800 too
+    return (int)(5000 * fpsScale);
+  else if (pixels <= 1920 * 1200)
+    return (int)(10000 * fpsScale);
+  else if (pixels <= 2560 * 1600)
+    return (int)(20000 * fpsScale);
+  else /* if (pixels <= 3840 * 2160) */
+    return (int)(40000 * fpsScale);
 }

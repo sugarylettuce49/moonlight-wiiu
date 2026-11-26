@@ -13,8 +13,8 @@
 #define millis() OSTicksToMilliseconds(OSGetTime())
 
 int disable_gamepad = 0;
-int swap_buttons = 0;
-mouse_modes mouse_mode = MOUSE_MODE_RELATIVE;
+int swap_buttons = 1;
+mouse_modes mouse_mode = MOUSE_MODE_ABSOLUTE;
 
 static char lastTouched = 0;
 static char touched = 0;
@@ -29,9 +29,8 @@ static uint64_t touchDownMillis = 0;
 #define TOUCH_WIDTH 1280
 #define TOUCH_HEIGHT 720
 
-static int thread_running;
+static volatile int thread_running;
 static OSThread inputThread;
-static OSAlarm inputAlarm;
 
 // ~60 Hz
 #define INPUT_UPDATE_RATE OSMillisecondsToTicks(16)
@@ -119,7 +118,8 @@ void wiiu_input_update(void) {
   short controllerNumber = 0;
   short gamepad_mask = 0;
 
-  for (int i = 0; i < wiiu_input_num_controllers(); i++)
+  uint32_t num_controllers = wiiu_input_num_controllers();
+  for (uint32_t i = 0; i < num_controllers; i++)
     gamepad_mask |= 1 << i;
 
   VPADStatus vpad;
@@ -291,15 +291,25 @@ uint32_t wiiu_input_num_controllers(void)
   return numControllers;
 }
 
+// buttons held during the last call to wiiu_input_buttons_triggered
+static uint32_t last_held_buttons = 0;
+
+uint32_t wiiu_input_buttons_held(void)
+{
+  return last_held_buttons;
+}
+
 uint32_t wiiu_input_buttons_triggered(void)
 {
   uint32_t btns = 0;
+  uint32_t held = 0;
 
   VPADStatus vpad;
   VPADReadError vpad_err;
   VPADRead(VPAD_CHAN_0, &vpad, 1, &vpad_err);
   if (vpad_err == VPAD_READ_SUCCESS) {
     btns |= vpad.trigger;
+    held |= vpad.hold;
   }
 
   KPADStatus kpad_data = {0};
@@ -308,7 +318,7 @@ uint32_t wiiu_input_buttons_triggered(void)
 		KPADReadEx((KPADChan) i, &kpad_data, 1, &kpad_err);
 		if (kpad_err == KPAD_ERROR_OK) {
       if (kpad_data.extensionType == WPAD_EXT_PRO_CONTROLLER) {
-#define MAPBTNS(b, v) if (kpad_data.pro.trigger & b) btns |= v;
+#define MAPBTNS(b, v) if (kpad_data.pro.trigger & b) btns |= v; if (kpad_data.pro.hold & b) held |= v;
         MAPBTNS(WPAD_PRO_BUTTON_UP,       VPAD_BUTTON_UP);
         MAPBTNS(WPAD_PRO_BUTTON_LEFT,     VPAD_BUTTON_LEFT);
         MAPBTNS(WPAD_PRO_TRIGGER_ZR,      VPAD_BUTTON_ZR);
@@ -329,7 +339,7 @@ uint32_t wiiu_input_buttons_triggered(void)
 #undef MAPBTNS
       }
       else if (kpad_data.extensionType == WPAD_EXT_CLASSIC || kpad_data.extensionType == WPAD_EXT_MPLUS_CLASSIC) {
-#define MAPBTNS(b, v) if (kpad_data.classic.trigger & b) btns |= v;
+#define MAPBTNS(b, v) if (kpad_data.classic.trigger & b) btns |= v; if (kpad_data.classic.hold & b) held |= v;
         MAPBTNS(WPAD_CLASSIC_BUTTON_UP,     VPAD_BUTTON_UP);
         MAPBTNS(WPAD_CLASSIC_BUTTON_LEFT,   VPAD_BUTTON_LEFT);
         MAPBTNS(WPAD_CLASSIC_BUTTON_ZR,     VPAD_BUTTON_ZR);
@@ -353,22 +363,31 @@ uint32_t wiiu_input_buttons_triggered(void)
     }
   }
 
+  last_held_buttons = held;
   return btns;
-}
-
-static void alarm_callback(OSAlarm* alarm, OSContext* ctx)
-{
-  wiiu_input_update();
 }
 
 static int input_thread_proc(int argc, const char **argv)
 {
-  OSCreateAlarm(&inputAlarm);
-  OSSetPeriodicAlarm(&inputAlarm, 0, INPUT_UPDATE_RATE, alarm_callback);
-
+  // Poll from a normal thread instead of an OSAlarm callback. Alarm callbacks
+  // run in interrupt context, where taking the input queue mutex inside
+  // LiSend*Event (and doing VPAD/KPAD reads) can stall whatever thread was
+  // interrupted, which shows up as periodic hitches in the stream.
+  OSTime next = OSGetSystemTime();
   while (thread_running) {
-    OSWaitAlarm(&inputAlarm);
+    wiiu_input_update();
+
+    next += INPUT_UPDATE_RATE;
+    OSTime now = OSGetSystemTime();
+    if (next > now) {
+      OSSleepTicks(next - now);
+    } else {
+      // we fell behind, don't try to catch up with a burst of updates
+      next = now;
+    }
   }
+
+  return 0;
 }
 
 static void thread_deallocator(OSThread *thread, void *stack)
@@ -404,6 +423,5 @@ void start_input_thread(void)
 void stop_input_thread(void)
 {
   thread_running = 0;
-  OSCancelAlarm(&inputAlarm);
   OSJoinThread(&inputThread, NULL);
 }

@@ -21,7 +21,10 @@
 #define H264_FRAME_HEIGHT(h) (((h) + 0xf) & ~0xf)
 #define H264_MAX_FRAME_SIZE H264_FRAME_SIZE(H264_FRAME_PITCH(2800), 1408)
 
-#define DECODER_BUFFER_SIZE 92*1024
+// IDR frames are much larger than regular frames. At 720p/1080p with higher
+// bitrates they easily exceed 100KB, and dropping one corrupts every frame
+// that references it until the next IDR.
+#define DECODER_BUFFER_SIZE (1024 * 1024)
 
 yuv_texture_t textures[NUM_BUFFERS];
 uint32_t currentTexture;
@@ -134,6 +137,10 @@ static int wiiu_decoder_setup(int videoFormat, int width, int height, int redraw
   }
   currentTexture = 0;
 
+  // drop any frames left over from a previous session, their textures are gone
+  reset_frame_queue();
+  wiiu_stream_set_video_size(height, H264_FRAME_HEIGHT(height));
+
   decodebuffer = memalign(H264_MEM_ALIGNMENT, DECODER_BUFFER_SIZE + 64);
   if (decodebuffer == NULL) {
     fprintf(stderr, "Not enough memory\n");
@@ -144,6 +151,8 @@ static int wiiu_decoder_setup(int videoFormat, int width, int height, int redraw
 }
 
 static void wiiu_decoder_cleanup() {
+  reset_frame_queue();
+
   H264DECFlush(decoder);
   H264DECEnd(decoder);
   H264DECClose(decoder);
@@ -161,8 +170,9 @@ static void wiiu_decoder_cleanup() {
 
 static int wiiu_decoder_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (decodeUnit->fullLength > DECODER_BUFFER_SIZE) {
-    fprintf(stderr, "Video decode buffer too small\n");
-    return DR_OK;
+    fprintf(stderr, "Video decode buffer too small (%d bytes)\n", decodeUnit->fullLength);
+    // the frame was dropped, ask for a fresh IDR so we don't decode garbage
+    return DR_NEED_IDR;
   }
 
   PLENTRY entry = decodeUnit->bufferList;
@@ -186,8 +196,6 @@ static int wiiu_decoder_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     printf("h264_wiiu: Error decoding frame 0x%07X\n", res);
     return DR_NEED_IDR;
   }
-
-  nextFrame++;
 
   add_frame(tex);
 

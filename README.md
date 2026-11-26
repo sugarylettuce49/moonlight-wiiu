@@ -1,3 +1,9 @@
+Looks like this is abandonware so I went and asked Claude to fix some shit.
+
+Yes it's AI assisted, you're either hungry or you're not.
+
+
+
 # Moonlight Wii U
 
 Moonlight Wii U is a port of [Moonlight Embedded](https://github.com/moonlight-stream/moonlight-embedded), which is an open source client for [Sunshine](https://github.com/LizardByte/Sunshine) and NVIDIA GameStream. Moonlight allows you to stream your full collection of games and applications from your PC to other devices to play them remotely.
